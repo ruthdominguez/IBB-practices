@@ -1,0 +1,460 @@
+---
+title: "BIOINFORMATIC ANALYSIS OF SINGLE-CELL TRANSCRIPTOME DATA"
+subtitle: "IBB internship"
+
+author: "Ruth Domínguez"
+date: "05/03/2020"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.align = "center", fig.width = 6, fig.height = 4)
+library (usethis)
+library (devtools)
+library (ggplot2)
+library (DistMap)
+library (data.table)
+library (UpSetR)
+library (svglite)
+library (dplyr)
+library (tidyverse)
+library (iMKT)
+library (BiocManager)
+library (GOstats)
+library (org.Dm.eg.db)
+library (biomaRt)
+library (readxl)
+library (RColorBrewer)
+```
+
+## DATA UPLOADING
+
+The data used to develope this study was obtained from Karaiskos, Nikos, et al, 2017. The study has been done qualitatively, the value expressed is not considered, if not only if it is expressed. 
+
+```{r introduction}
+# Load the data
+normalized_data <- as.data.frame(fread("/home/rdominguez/Desktop/DistMap/distmap-master/data/dge_normalized.txt", header = T, sep= '\t'))
+
+# Save the list of gen names and cell names
+gen_names <- as.vector (normalized_data$gene)
+cell_names <- as.vector (colnames(normalized_data))
+cell_names <- cell_names[2:length(cell_names)]
+
+# Save normalized data on a matrix
+row.names(normalized_data) <- normalized_data$gene
+normalized_data <- as.matrix(within(normalized_data, rm(gene)))
+```
+
+## CELL EXPRESSION ANALYSIS
+This script counts the amount of genes expressed in each cell.
+```{r celCont} 
+# List of genes
+lista_cel <- vector("list", nrow(normalized_data))
+
+# Loop to see in which cells is expressed each gen
+for (i in 1:length(gen_names)){ 
+  vect = NULL
+  name = NULL
+  for (j in 1:length(cell_names)){ 
+    if (normalized_data[i,j] != 0){   
+      name = cell_names[j]  
+      vect = c(vect, name) 
+    }
+  }
+  lista_cel[[i]] <- vect
+}
+names(lista_cel) <- gen_names
+
+# Count the number of gens expressed in each cell
+cell_data <- data.frame(table(sapply(unlist(lista_cel), function(x) x)))
+colnames(cell_data) <- c("cell", "freq")
+```
+The analysis of the gens expressed in each cell could not be continued. This was due to the absence of data about the embryo’s position in each cell.
+
+## GENE EXPRESSION ANALYSIS
+This script counts the amount of cells expressing each gene. 
+```{r genCont}
+# Variable definition
+lista_gen <- NULL
+lista_gen <- vector("list", length(cell_names))
+
+# Loop to see which gens are expressed in each cell
+for (j in 1:length(cell_names)){ 
+  vect = NULL
+  name = NULL
+  for (i in 1:length(gen_names)){ 
+    if (normalized_data[i,j] != 0){    
+      name = gen_names[i] 
+      vect = c(vect, name)
+    }
+  }
+  lista_gen[[j]] <- vect
+}
+
+names(lista_gen) <- cell_names
+
+# Count the amount of cells in wich each gene is expressed
+gen_data<- data.frame(table(sapply(unlist(lista_gen), function(x) x)))
+colnames(gen_data) <- c("gene", "freq")
+
+```
+
+## FLY BASE FILTERING
+In order to analyse the data, the gen names used would be the PopFly ones. For that reason, the gens used are filtered by the ones on that data base. Relating to that, the gens excluded from the analysis are saved apart.
+
+```{r flyBase, results=FALSE, message=FALSE, warning=FALSE}
+# Upload data of correspondency between ensemblr names and Flybase names
+fly_data <- as.data.frame(fread("/home/rdominguez/Desktop/Flybase/DATA/fbgn_annotation_ID_fb_2014_03.tsv", header=T, sep= '\t'))
+names(fly_data) <- c("gene_symbol", "primary_FBgn", "secondary_FBgn", "annot_ID", "secondary_annot_ID")
+fly_data <- fly_data[,c("gene_symbol", "primary_FBgn")]
+
+# Save the gens wich are not on Flybase
+dif <- setdiff(x=gen_data$gene, y = fly_data$gene_symbol)
+
+# Filtering the data with the one on FlyBase
+gen_data <- merge(x = gen_data, y = fly_data, by.x="gene", by.y = "gene_symbol")
+colnames(gen_data) <- c("gene", "freq", "FBgn")
+
+# Upload data of correspondency between gene names and proteins coded
+gen_prot <- as.data.frame(na.omit(read_tsv("/home/rdominguez/Desktop/Rs/fbgn_fbtr_fbpp_fb_2014_03.tsv", skip = 5, col_names = c("FBgn","FBtr","FBpp"))))
+
+# Save the correspondencies (not added to gen_data to not generate redundance)
+gen_prot <- as.data.frame(within(gen_prot, rm(FBtr)))
+
+# Upload PopFly data and save the unique PopFly ids
+loadPopFly()
+genes_pop <- as.data.frame(unique(PopFlyData$Name))
+names(genes_pop) <- c("FBgn")
+
+# Create the dataframe with the gens on PopFly
+gen_data <- merge(gen_data, genes_pop)
+
+```
+
+
+## CLUSTERING
+Concerning to the continuation of the analysis, the genes were divided in ten clusters depending on the number of cells expressed. Cluster 1 contains the least expressed gens while cluster 10 has the most expressed ones. Similarly, we find the cell with the least expressed genes on cluster 1. On the other hand, the cell with the most genes expressed is cluster 10.
+
+
+```{r clustCell}
+# Cells clusters definition
+cell_data$quartile <- with(cell_data, cut(freq, breaks = quantile(freq, probs = seq(0,1, by = 0.1), na.rm = TRUE), include.lowestsed. = TRUE)) 
+cell_data$cluster <- as.numeric(cell_data$quartile)
+
+# Gen clusters definition
+gen_data$quartile <- with(gen_data, cut(freq, breaks = quantile(freq, probs = seq(0,1, by = 0.1), na.rm = TRUE), include.lowest = TRUE)) 
+gen_data$cluster <- as.numeric(gen_data$quartile)
+
+# Save gen quartiles values 
+quartiles <- as.vector(unique(gen_data$quartile))
+
+```
+
+
+## ESSENTIALITY
+The essentiality analysis was carried out to see if there was any correlation between the cluster and genes' essentiality.
+```{r essent}
+# Upload essentiality data
+essentiality_data <- as.data.frame(fread("/home/rdominguez/Desktop/Rs/filtered_essentiality.txt", header = F, sep= '\t', stringsAsFactors = F))
+colnames(essentiality_data) = c("Name", "Kingdom", "datasetID",  "locus", "essentiality", "pubmedID", "taxID", "thumbup", "thumbdown", "valid", "fitnessScore", "id")
+
+# Save columns of interest
+essentiality_data <- as.data.frame(cbind(essentiality_data$locus,essentiality_data$essentiality))
+colnames(essentiality_data) = c("FBgn",  "essentiality")
+
+# Add essentiality data to gen_data dataframe
+gen_data <- merge(x = gen_data, y = essentiality_data, all.x = T)
+
+```
+
+## GENE ONTOLOGY
+The gen ontology analysis was run to verify if there was a correlation between the gen cluster and the molecular function of the gene.
+```{r GO, results=FALSE, warning=FALSE, message=FALSE}
+# Define the data base and the data set to use
+ensembl <- useMart("ENSEMBL_MART_ENSEMBL", dataset = "dmelanogaster_gene_ensembl")
+bm <- useDataset("dmelanogaster_gene_ensembl", mart = ensembl)
+
+# Declare the final dataframe for the GO results and the datafra  me with the higher values
+GOresult <- data.frame(GOBPID = character(),
+                       Pvalue = integer(),
+                       oddsRatio = integer(),
+                       ExpCount = integer(),
+                       Count = integer(),
+                       Size = integer(),
+                       Term = character(),
+                       Cluster = integer(),
+                       stringsAsFactors = FALSE)
+GOhigh <- GOresult
+
+# Loop for the GO analysis
+for (n in 1:10){
+  # Selection of the gens of the cluster
+  gen_clust <- as.vector(gen_data$FBgn[which(gen_data$cluster==n)])
+  
+  # Biomart query to find on Ensembl Drosophila database 
+  entrez_BM <- getBM(attributes= c("ensembl_gene_id", "entrezgene_id"), filter = "ensembl_gene_id", values = gen_clust, mart = bm, uniqueRows = TRUE)
+  
+  # Remove na values
+  Entrez_ids <- as.character(na.omit(entrez_BM$entrezgene_id))
+  
+  # Testing GO terms asociation 
+  universe <- mappedkeys(org.Dm.egGO)
+  count.mappedkeys(org.Dm.egGO)
+  
+  # Defining treeshole to the p value
+  GOtest <- new("GOHyperGParams",
+                geneIds = Entrez_ids,
+                universeGeneIds = universe,
+                annotation = "org.Dm.eg.db",
+                ontology = "BP",
+                pvalueCutoff= 0.05,
+                conditional = FALSE,
+                testDirection = "over") 
+  
+  # Hypergeometric test  
+  GOtestOver <- hyperGTest(GOtest)
+  
+  # Gen ontology results for the cluster
+  GOclust <- summary(GOtestOver)
+  GOclust$Cluster = n
+  
+  # Sort the dataframe according to the p-values
+  GOclust <- arrange(GOclust, Pvalue)
+  
+  # Adding the cluster results to the final dataframe
+  GOresult <- rbind(GOresult, GOclust)
+  
+  # Saving the 20 most significant values
+  GOhigh <- rbind(GOhigh, GOclust[1:10,])
+  
+  print(paste0("Cluster: ", n))
+}
+
+# Save the results of the Gene Ontology
+save(GOresult, file = "GOresult.RData")
+save(GOhigh, file = "GOtop10.RData")
+```
+
+
+## CONNECTIVITY
+Followed by that, the connectivity analysis was realized to see the correlation with the genes's connections. 
+```{r connect}
+# Upload connectivity data
+connectivity_data <- as.data.frame(fread("/home/rdominguez/Desktop/Rs/filtered_connectivity.txt", header = F, sep= '\t', stringsAsFactors = F))
+colnames(connectivity_data) = c("Name", "Kingdom", "taxID", "FBpp", "locus", "scorecutoff", "connectivity", "toppercentile")
+
+# Prepare connectivity data to the analysis
+connectivity_data <- as.data.frame(cbind(connectivity_data$FBpp, connectivity_data$connectivity))
+colnames(connectivity_data) = c("FBpp",  "connectivity")
+connectivity_data = merge(connectivity_data, gen_prot)
+connectivity_data$connectivity = as.numeric(as.character(connectivity_data$connectivity))
+
+# Add connectivity to gen_data
+gen_data <- merge(x = gen_data, y = connectivity_data, all.x = T)
+
+# Save the results of the gen_data
+save(gen_data, file = "gen_data.RData")
+```
+
+## PHYLOSTRATUM
+Posteriorly, the phylostratum analysis was done to verify the correlation with the genes' age.
+
+```{r phylo}
+# Upload pylostratum data
+Agedata <- as.data.frame(read_excel("/home/rdominguez/Desktop/Rs/SupplementarytableS3.xls"))
+Agedata <- (Agedata[,1:2])
+colnames(Agedata) <- c("phylostratum", "FBpp")
+Agedata$FBpp <- gsub('fb', 'FB', Agedata$FBpp)
+
+# Data frame with the ages of the proteines 
+Agedata <- merge(x = gen_prot, y = Agedata)
+
+# Add phylostratum to gen_data
+gen_data <- merge(x = gen_data, y = Agedata, all.x = T)
+
+```
+
+## iMKT ANALYSIS
+Some of the previous analysis were needed to be done by using a bootstrap to increment the acuracity of the results. That is the reason why the results of all of them were calculated in the same bootstrap loop that the one used to calculate the iMKT results and in their specific section is only included the data preparation.
+
+The iMKT analysis allowed to detect different types of adaptation among the spatial pleiotropy.
+```{r bootstrap, results=FALSE, message=FALSE, warning=FALSE}
+# Create the dataframe with the bootstrap results
+Results_boots <- data.frame(Cluster = integer(),
+                           bootstap_rep = integer(),
+                           count_gens = integer(),
+                           quartile = vector(),
+                           alpha_stand = integer(),
+                           Ka= integer(),
+                           Ks= integer(),
+                           omega = integer(),
+                           omegaA_stand = integer(),
+                           omegaD_stand = integer(),
+                           #amkt
+                           alpha_aMKT = integer(),
+                           omegaA_aMKT = integer(),
+                           omegaD_aMKT = integer(),
+                           #emkt
+                           alpha_eMKT = integer(),
+                           omegaA_eMKT = integer(),
+                           omegaD_eMKT = integer(),
+                           phylostratum = integer(),
+                           connectivity = integer(),
+                           stringsAsFactors=FALSE)
+
+# Loop to fill the Results_boots dataframe
+for (n in 1:10){ # For each cluster
+  
+  # Select the gens of the cluster filtering the ones on PopFly
+  clusterA <- as.vector(gen_data$FBgn[which(gen_data$cluster==n)])
+  
+  # Set the quartiles value
+  quart <- as.vector(quartiles[n])
+  
+  # Generate the bootstrap matrix
+  set.seed(16)
+  boot_samp <- matrix(sample(clusterA, 50000, replace = T), nrow=100, ncol=500)
+  
+  for (m in 1:100){ # For each replication
+    clusterA_boots <- as.vector(boot_samp[m,])
+    
+    # Set the mean phylogeny of the sample
+    phylo <- subset(Agedata, FBgn %in% clusterA_boots)
+    phylo <- mean(na.omit(phylo$phylostratum))
+    
+    # Set the mean connectivity of the sample
+    connect <- subset(connectivity_data, FBgn %in% clusterA_boots)
+    connect <- mean(na.omit(connect$connectivity))
+    
+    # Do the Standart MKT and save the results of interest 
+    ResultStand <- PopFlyAnalysis(genes = clusterA_boots, pop="RAL", cutoff = 0.05, recomb = FALSE,
+                                  test = "standardMKT", plot = FALSE)
+    alpha_stand <- ResultStand[["Population =  RAL"]][["alpha"]][["alpha"]]
+    integer(Ka_stand <- ResultStand[["Population =  RAL"]][["divMetrics"]][["Ka"]])
+    integer( Ks_stand <- ResultStand[["Population =  RAL"]][["divMetrics"]][["Ks"]])
+    integer (omega <- ResultStand[["Population =  RAL"]][["divMetrics"]][["omega"]])
+    integer (omegaA_stand <- ResultStand[["Population =  RAL"]][["divMetrics"]][["omegaA"]])
+    integer(omegaD_stand <- ResultStand[["Population =  RAL"]][["divMetrics"]][["omegaD"]])
+    
+    # Do the aMKT and save the results of interest 
+    Result_aMKT <- PopFlyAnalysis(genes = clusterA_boots, pop="RAL", cutoff = 0.05, recomb = FALSE,
+                                  test = "aMKT", plot = FALSE)
+    integer(alpha_aMKT <- Result_aMKT[["Population =  RAL"]][["alphaCorrected"]][["alphaAsymptotic"]])
+    omegaA_aMKT <- (omega * alpha_aMKT)
+    omegaD_aMKT <- (omega - omegaA_aMKT)
+    
+    # Do the eMKT and save the results of interest 
+    Result_eMKT <- PopFlyAnalysis(genes = clusterA_boots, pop="RAL", cutoff = 0.05, recomb = FALSE,
+                                  test = "eMKT", plot = FALSE)
+    integer(alpha_eMKT <- Result_eMKT[["Population =  RAL"]][["alphaCorrected"]][["alphaCorrected"]])
+    omegaA_eMKT <- Result_eMKT[["Population =  RAL"]][["divMetrics"]][["metricsByCutoff"]][["omegaA"]]
+    omegaD_eMKT <- Result_eMKT[["Population =  RAL"]][["divMetrics"]][["metricsByCutoff"]][["omegaD"]]
+    
+    # Save all the results on the dataframe
+    Results_boots[nrow(Results_boots) + 1,] = c(n, m, length(clusterA_boots), quart, alpha_stand, Ka_stand, Ks_stand, omega, omegaA_stand, omegaD_stand, alpha_aMKT, omegaA_aMKT, omegaD_aMKT, alpha_eMKT, omegaA_eMKT, omegaD_eMKT, phylo, connect)
+    print(paste0("Cluster: ", n," - Replica: ", m))
+    
+  }
+}
+
+# Save the results of the bootstrap
+save(Results_boots, file = "Results_boots.RData")
+
+```
+
+## GRAPHICS
+The following script includes the code used to generate the different plots shown on the results section.
+
+```{r plots, eval=F}
+# GO results plot  
+GOplot <- ggplot(GOhigh, aes(x = Term, y = Count, fill = as.factor(Cluster))) +
+  geom_col() + scale_fill_viridis_d() + theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1,vjust = 0), plot.title = element_text(size = 22)) + 
+  labs(title = "Enrichment analysis results", x = "GO term", y = "Count", fill = "Cluster") 
+
+ggsave("GOplot_top10_3.png", GOplot, height = 10, width = 15)
+
+# Essentiality plot 
+essentPlot  <- ggplot(gen_data, aes(x=cluster, fill = essentiality)) +
+  geom_bar(position = "fill") + scale_x_discrete(limits = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) +
+  theme_bw(base_size = 25) + scale_fill_manual(values = c("#7D466A","#53ACB0"), na.value = "#FFDC6E") +
+  labs(title = "Genetic essentiality according to the cluster", x= "Cluster", y= "Proportion", fill = "Essentiality")
+
+ggsave("essentPlot.svg", essentPlot, height = 10, width = 15)
+
+# Connectivity mean plot
+ConnectPlot <- ggplot(data = Results_boots, aes(x = Cluster, y = as.numeric(connectivity)), fill=as.numeric(Cluster)) + 
+  geom_boxplot(aes(fill = Cluster)) + 
+  scale_x_discrete(limits = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) +
+  theme_bw(base_size = 25) + scale_fill_viridis_d(limits=c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) + labs(title = "Connectivity mean", y = "Connections", x = "Cluster")
+
+ggsave("Connectivity.svg", ConnectPlot, height = 10, width = 15)
+
+
+# Phylostratum mean plot
+PhyloPlot <- ggplot(data = Results_boots, aes(x = Cluster, y = as.numeric(phylostratum)), fill = Cluster) +
+  geom_boxplot(aes(fill = Cluster)) + 
+  scale_x_discrete(limits = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) +
+  theme_bw(base_size = 25) + scale_fill_viridis_d(limits = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) +
+  labs(title = "Phylostratum mean", y = "Phylostratum", x = "Cluster")
+
+
+ggsave("Phylostratum.svg", PhyloPlot, height = 10, width = 15)
+
+# Phylostratum head-map plot  
+mat_heat <- as.data.frame(table(gen_data$phylostratum, gen_data$cluster))
+colnames(mat_heat) <- c("Phylostratum", "Cluster", "Count")
+
+heatMap <- ggplot(mat_heat, aes(Cluster, Phylostratum )) +
+  geom_tile(aes(fill = Count), color = "white") +
+  scale_fill_gradient(low = "white", high = "#7D466A") +
+  theme_bw()+
+  geom_text(aes(label = Count)) +
+  labs(title= "Gene phylostratum distribution", fill = "Count", x= "Cluster", y="Phylostratum")
+
+ggsave("HeatMap.svg", heatMap, height = 10, width = 15)
+
+# iMKT plots
+# Function to generare the boxplots
+## Data needed: datas dataframe, column1, column2, vector with method names (name1,name2) 
+MakeBoxplot <- function(Data, Col1, Col2, methods_names){
+  Met1 <- cbind(methods_names[1], Col1, Data$Cluster)
+  Met2 <- cbind(methods_names[2], Col2, Data$Cluster)
+  Alphas <- rbind(Met1, Met2)
+  Alphas <- as.data.frame(Alphas)
+  colnames(Alphas) <- c("Method", "Alpha", "Cluster")
+  Alphas$Alpha = as.numeric(as.character(Alphas$Alpha))
+  
+  Boxplot <- ggplot(data = Alphas, mapping = aes(x = Cluster, y = Alpha)) +
+    geom_boxplot(aes(fill = Method, colour = Cluster)) + 
+    theme_bw(base_size = 25) + scale_colour_viridis_d(limits = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)) +
+    scale_fill_manual(values = c("#7D466A","#53ACB0")) +
+    scale_x_discrete(limits = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+}
+
+
+
+# Plot with Alpha values
+AlphasBoxplot <- MakeBoxplot(Results_boots, Results_boots$alpha_aMKT, Results_boots$alpha_eMKT, c("aMKT", "eMKT"))
+AlphasBoxplot <- AlphasBoxplot + labs(title = "Alpha values distribution", x = "Cluster", y = "Alpha value", colour = "Cluster", fill = "Method")
+
+ggsave("Alphaboxplot.svg", AlphasBoxplot, height = 10, width = 15)
+
+
+# Plot with Omega Alpha values
+OmegaAlphaBoxplot <- MakeBoxplot(Results_boots, Results_boots$omegaA_aMKT, Results_boots$omegaA_eMKT, c("aMKT", "eMKT"))
+
+OmegaAlphaBoxplot <- OmegaAlphaBoxplot + labs(title = "Omega Alpha values distribution", x = "Cluster", y = "Omega Alpha value", colour = "Cluster", fill = "Method")
+
+ggsave("OmegaAboxplot.svg", OmegaAlphaBoxplot, height = 10, width = 15)
+
+
+# Plot with Omega D values
+OmegaDBoxplot <- MakeBoxplot(Results_boots, Results_boots$omegaD_aMKT, Results_boots$omegaD_eMKT, c("aMKT", "eMKT"))
+OmegaDBoxplot <- OmegaDBoxplot + labs (title = "Omega D values distribution", x = "Cluster", y = "Omega D value", colour = "Cluster", fill = "Method")
+
+ggsave("OmegaDboxplot.svg", OmegaDBoxplot, height = 10, width = 15)
+
+```
